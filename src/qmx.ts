@@ -14,6 +14,7 @@ import {
   DEFAULT_OLLAMA_HOST,
   DEFAULT_RERANKER_MODEL,
   doctorChecks,
+  embeddingCoverage,
   getDocument,
   listCollectionSummaries,
   listContexts,
@@ -501,58 +502,76 @@ async function main() {
   if (command === "embed" || command === "vector") {
     const ui = parseUiOptions(rest);
     const startedAt = Date.now();
+    let cancelRequested = false;
+    let cancelNotified = false;
+    const onSigint = () => {
+      cancelRequested = true;
+      if (!cancelNotified) {
+        cancelNotified = true;
+        console.error(colorize("Menerima SIGINT. Menyelesaikan dokumen aktif lalu berhenti aman...", "yellow", ui));
+      }
+    };
+    process.on("SIGINT", onSigint);
     const force = rest.includes("-f") || rest.includes("--force");
     if (force) {
       const cleared = clearEmbeddings(db);
       console.log(`Embedding cache dibersihkan: ${cleared} dokumen.`);
     }
     let printedHeader = false;
-    const stats = await runIndexUpdate(db, {
-      embed: true,
-      host,
-      model,
-      onProgress: (event) => {
-        if (event.stage === "plan") {
-          if (ui.compact) {
-            console.log(`Embed plan | docs=${event.documents} chunks=${event.chunks} model=${event.model}`);
-          } else {
-            console.log(colorize("Embed Plan", "cyan", ui));
-            const lines = buildEmbedIntro({
-              documents: event.documents,
-              chunks: event.chunks,
-              bytes: event.bytes,
-              splitDocuments: event.splitDocuments,
-              model: event.model,
-            });
-            for (const line of lines) console.log(`  ${line}`);
-          }
-          printedHeader = true;
-          return;
-        }
-        if (event.stage === "doc") {
-          const percent = event.total > 0 ? Math.round((event.index / event.total) * 100) : 0;
-          if (ui.compact) {
-            console.log(`[${event.index}/${event.total}] ${event.displayPath} (${event.chunks} chunks)`);
-          } else {
-            console.log(`[${padCell(`${percent}%`, 4)}] [${event.index}/${event.total}] ${event.displayPath} (${event.chunks} chunks)`);
-          }
-        }
-      },
-    });
-    if (!printedHeader) {
-      const lines = buildEmbedIntro({
-        documents: stats.embeddedDocs,
-        chunks: stats.embeddedChunks,
-        bytes: stats.embeddedBytes,
-        splitDocuments: stats.splitDocuments,
+    try {
+      const stats = await runIndexUpdate(db, {
+        embed: true,
+        host,
         model,
+        shouldStop: () => cancelRequested,
+        onProgress: (event) => {
+          if (event.stage === "plan") {
+            if (ui.compact) {
+              console.log(`Embed plan | docs=${event.documents} chunks=${event.chunks} model=${event.model}`);
+            } else {
+              console.log(colorize("Embed Plan", "cyan", ui));
+              const lines = buildEmbedIntro({
+                documents: event.documents,
+                chunks: event.chunks,
+                bytes: event.bytes,
+                splitDocuments: event.splitDocuments,
+                model: event.model,
+              });
+              for (const line of lines) console.log(`  ${line}`);
+            }
+            printedHeader = true;
+            return;
+          }
+          if (event.stage === "doc") {
+            const percent = event.total > 0 ? Math.round((event.index / event.total) * 100) : 0;
+            if (ui.compact) {
+              console.log(`[${event.index}/${event.total}] ${event.displayPath} (${event.chunks} chunks)`);
+            } else {
+              console.log(`[${padCell(`${percent}%`, 4)}] [${event.index}/${event.total}] ${event.displayPath} (${event.chunks} chunks)`);
+            }
+          }
+        },
       });
-      for (const line of lines) console.log(line);
+      if (!printedHeader) {
+        const lines = buildEmbedIntro({
+          documents: stats.embeddedDocs,
+          chunks: stats.embeddedChunks,
+          bytes: stats.embeddedBytes,
+          splitDocuments: stats.splitDocuments,
+          model,
+        });
+        for (const line of lines) console.log(line);
+      }
+      const duration = formatDurationMs(Date.now() - startedAt);
+      const finalLine = `Embed selesai | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed} embedded_docs=${stats.embeddedDocs} embedded_chunks=${stats.embeddedChunks}`;
+      console.log(colorize(finalLine, "green", ui));
+      if (!ui.noSummary) console.log(colorize(`Duration: ${duration}`, "dim", ui));
+      if (stats.cancelled) {
+        console.error(colorize("Embed dibatalkan aman. Jalankan 'qmx embed' untuk melanjutkan dari progres terakhir.", "yellow", ui));
+      }
+    } finally {
+      process.off("SIGINT", onSigint);
     }
-    const duration = formatDurationMs(Date.now() - startedAt);
-    const finalLine = `Embed selesai | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed} embedded_docs=${stats.embeddedDocs} embedded_chunks=${stats.embeddedChunks}`;
-    console.log(colorize(finalLine, "green", ui));
-    if (!ui.noSummary) console.log(colorize(`Duration: ${duration}`, "dim", ui));
     return;
   }
 
@@ -611,6 +630,25 @@ async function main() {
     const collection = parseFlagString(rest, "-c", "--collection", "");
     const minScoreIdx = rest.indexOf("--min-score");
     const minScore = minScoreIdx >= 0 && minScoreIdx + 1 < rest.length ? Number(rest[minScoreIdx + 1]) || 0 : 0;
+    const coverage = embeddingCoverage(db, collection || undefined);
+    const ui = parseUiOptions(rest);
+
+    if (!rest.includes("--json")) {
+      console.log(
+        colorize(
+          `Query mode=hybrid expand=${rest.includes("--no-expand") ? "off" : "on"} rerank=${rest.includes("--no-rerank") ? "off" : "on"} embeddings=${coverage.embeddedDocuments}/${coverage.totalDocuments}`,
+          "dim",
+          ui
+        )
+      );
+    }
+
+    if (coverage.totalDocuments > 0 && coverage.missingDocuments > 0) {
+      console.error(
+        `Warning: ${coverage.missingDocuments} documents (${coverage.missingPercent}%) need embeddings. Run 'qmx embed' for better results.`
+      );
+    }
+
     try {
       const rows = await queryDocuments(db, {
         query,
@@ -639,6 +677,12 @@ async function main() {
     const collection = parseFlagString(rest, "-c", "--collection", "");
     const minScoreIdx = rest.indexOf("--min-score");
     const minScore = minScoreIdx >= 0 && minScoreIdx + 1 < rest.length ? Number(rest[minScoreIdx + 1]) || 0 : 0;
+    const coverage = embeddingCoverage(db, collection || undefined);
+    if (coverage.totalDocuments > 0 && coverage.missingDocuments > 0) {
+      console.error(
+        `Warning: ${coverage.missingDocuments} documents (${coverage.missingPercent}%) need embeddings. Run 'qmx embed' for better results.`
+      );
+    }
     try {
       const rows = await queryDocuments(db, {
         query,

@@ -25,6 +25,7 @@ export type IndexStats = {
   embeddedChunks: number;
   embeddedBytes: number;
   splitDocuments: number;
+  cancelled: boolean;
 };
 
 export type SearchOptions = {

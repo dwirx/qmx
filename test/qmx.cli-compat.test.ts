@@ -142,6 +142,26 @@ describe("qmx cli compatibility", () => {
   });
 
   test(
+    "shows embedding warning in query when embeddings are missing",
+    () => {
+      const collectionPath = path.join(workspace, "vault");
+
+      let result = runCli(["collection", "add", collectionPath, "--name", "notes"]);
+      expect(result.exitCode).toBe(0);
+
+      result = runCli(["update", "--no-embed"]);
+      expect(result.exitCode).toBe(0);
+
+      result = runCli(["query", "Bun"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toContain("Warning:");
+      expect(result.stderr).toContain("Run 'qmx embed' for better results.");
+      expect(result.stdout).toContain("notes/");
+    },
+    20000
+  );
+
+  test(
     "supports native index/vector/rerank commands",
     () => {
     const collectionPath = path.join(workspace, "vault");

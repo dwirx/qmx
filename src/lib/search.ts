@@ -152,8 +152,16 @@ export function fuseRrf(
 
 export async function queryDocuments(db: Database, options: VectorSearchOptions): Promise<HybridRow[]> {
   const baseLimit = Math.max(options.limit ?? 5, 30);
-  const variations = options.noExpand ? [] : await expandQuery(options.query, options.host, options.expanderModel);
+  let variations: string[] = [];
+  if (!options.noExpand) {
+    try {
+      variations = await expandQuery(options.query, options.host, options.expanderModel);
+    } catch {
+      variations = [];
+    }
+  }
   const queries = [options.query, ...variations].slice(0, 3);
+  let vectorAvailable = true;
 
   const keywordMerged = new Map<string, SearchRow>();
   const vectorMerged = new Map<string, SearchRow>();
@@ -165,10 +173,16 @@ export async function queryDocuments(db: Database, options: VectorSearchOptions)
       if (!existing || row.score > existing.score) keywordMerged.set(row.docid, row);
     }
 
-    const vqs = await vsearchDocuments(db, { ...options, query: q, limit: baseLimit });
-    for (const row of vqs) {
-      const existing = vectorMerged.get(row.docid);
-      if (!existing || row.score > existing.score) vectorMerged.set(row.docid, row);
+    if (vectorAvailable) {
+      try {
+        const vqs = await vsearchDocuments(db, { ...options, query: q, limit: baseLimit });
+        for (const row of vqs) {
+          const existing = vectorMerged.get(row.docid);
+          if (!existing || row.score > existing.score) vectorMerged.set(row.docid, row);
+        }
+      } catch {
+        vectorAvailable = false;
+      }
     }
   }
 
@@ -204,21 +218,25 @@ export async function queryDocuments(db: Database, options: VectorSearchOptions)
   let filtered = out.filter((row) => row.score >= minScore);
 
   if (!options.noRerank && filtered.length > 0) {
-    const rerank = await rerankDocuments(
-      options.query,
-      filtered.slice(0, 30).map((r) => ({ docid: r.docid, title: r.title, snippet: r.snippet })),
-      options.host,
-      options.rerankerModel
-    );
-    filtered = filtered
-      .map((row, idx) => {
-        const rr = rerank.get(row.docid);
-        if (rr === undefined) return row;
-        const retrievalWeight = idx < 3 ? 0.75 : idx < 10 ? 0.6 : 0.4;
-        const rerankWeight = 1 - retrievalWeight;
-        return { ...row, score: row.score * retrievalWeight + rr * rerankWeight };
-      })
-      .sort((a, b) => b.score - a.score || a.displayPath.localeCompare(b.displayPath));
+    try {
+      const rerank = await rerankDocuments(
+        options.query,
+        filtered.slice(0, 30).map((r) => ({ docid: r.docid, title: r.title, snippet: r.snippet })),
+        options.host,
+        options.rerankerModel
+      );
+      filtered = filtered
+        .map((row, idx) => {
+          const rr = rerank.get(row.docid);
+          if (rr === undefined) return row;
+          const retrievalWeight = idx < 3 ? 0.75 : idx < 10 ? 0.6 : 0.4;
+          const rerankWeight = 1 - retrievalWeight;
+          return { ...row, score: row.score * retrievalWeight + rr * rerankWeight };
+        })
+        .sort((a, b) => b.score - a.score || a.displayPath.localeCompare(b.displayPath));
+    } catch {
+      // keep retrieval ranking when reranker is unavailable
+    }
   }
 
   const limit = options.all ? filtered.length : Math.max(1, options.limit ?? 5);

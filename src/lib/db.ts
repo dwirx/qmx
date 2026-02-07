@@ -138,6 +138,28 @@ export function clearEmbeddings(db: Database): number {
   return before;
 }
 
+export function embeddingCoverage(
+  db: Database,
+  collectionName?: string
+): { totalDocuments: number; embeddedDocuments: number; missingDocuments: number; missingPercent: number } {
+  const collection = collectionName?.trim() || "";
+  const row = db
+    .query(
+      `SELECT COUNT(*) AS totalDocuments,
+              SUM(CASE WHEN d.embedding IS NOT NULL THEN 1 ELSE 0 END) AS embeddedDocuments
+       FROM documents d
+       JOIN collections c ON c.id = d.collection_id
+       WHERE (? = '' OR c.name = ?)`
+    )
+    .get(collection, collection) as { totalDocuments: number; embeddedDocuments: number | null };
+
+  const totalDocuments = row.totalDocuments || 0;
+  const embeddedDocuments = row.embeddedDocuments || 0;
+  const missingDocuments = Math.max(0, totalDocuments - embeddedDocuments);
+  const missingPercent = totalDocuments > 0 ? Math.round((missingDocuments / totalDocuments) * 100) : 0;
+  return { totalDocuments, embeddedDocuments, missingDocuments, missingPercent };
+}
+
 export function statusInfo(db: Database): { collections: number; documents: number; contexts: number; embedded: number } {
   const collections = (db.query("SELECT COUNT(*) AS count FROM collections").get() as { count: number }).count;
   const documents = (db.query("SELECT COUNT(*) AS count FROM documents").get() as { count: number }).count;

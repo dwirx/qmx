@@ -70,4 +70,34 @@ describe("qmx core", () => {
     expect(byDocId).not.toBeNull();
     expect(byDocId?.docid).toBe(first.docid);
   });
+
+  test("can stop indexing safely and continue later", async () => {
+    const dbPath = path.join(workspace, "index.sqlite");
+    const db = openQmxDb(dbPath);
+
+    addCollection(db, {
+      name: "notes",
+      rootPath: path.join(workspace, "vault"),
+      mask: "**/*.md",
+    });
+
+    let checks = 0;
+    const firstRun = await runIndexUpdate(db, {
+      embed: false,
+      shouldStop: () => {
+        checks += 1;
+        return checks > 2;
+      },
+    });
+
+    expect(firstRun.cancelled).toBe(true);
+    expect(firstRun.scanned).toBeGreaterThan(0);
+    expect(firstRun.scanned).toBeLessThan(2);
+
+    const secondRun = await runIndexUpdate(db, { embed: false });
+    expect(secondRun.cancelled).toBe(false);
+
+    const results = searchDocuments(db, { query: "Bun Search Notes", limit: 10 });
+    expect(results.length).toBeGreaterThan(0);
+  });
 });

@@ -63,7 +63,7 @@ async function embedChunks(chunks: string[], host?: string, model?: string): Pro
 
 export async function runIndexUpdate(
   db: Database,
-  options?: { embed?: boolean; host?: string; model?: string; onProgress?: (event: ProgressEvent) => void }
+  options?: { embed?: boolean; host?: string; model?: string; onProgress?: (event: ProgressEvent) => void; shouldStop?: () => boolean }
 ): Promise<IndexStats> {
   const collections = listCollections(db);
   const stats: IndexStats = {
@@ -75,9 +75,11 @@ export async function runIndexUpdate(
     embeddedChunks: 0,
     embeddedBytes: 0,
     splitDocuments: 0,
+    cancelled: false,
   };
   const useEmbed = options?.embed ?? true;
   let embedAttempted = 0;
+  let stopRequested = false;
 
   const planDocs: Array<{ collectionId: number; relPath: string; displayPath: string; content: string; title: string; chunks: string[] }> = [];
 
@@ -110,11 +112,19 @@ export async function runIndexUpdate(
   }
 
   for (const collection of collections) {
+    if (options?.shouldStop?.()) {
+      stopRequested = true;
+      break;
+    }
     if (!existsSync(collection.rootPath)) continue;
     const relPaths = iterCollectionFiles(collection.rootPath, collection.mask);
     const aliveSet = new Set(relPaths);
 
     for (const relPath of relPaths) {
+      if (options?.shouldStop?.()) {
+        stopRequested = true;
+        break;
+      }
       const absPath = path.join(collection.rootPath, relPath);
       if (!existsSync(absPath)) continue;
 
@@ -209,6 +219,7 @@ export async function runIndexUpdate(
       upsertFts(db, existing.id, title, content);
       stats.updated += 1;
     }
+    if (stopRequested) break;
 
     const allDocs = db
       .query("SELECT id, rel_path AS relPath FROM documents WHERE collection_id = ?")
@@ -222,6 +233,7 @@ export async function runIndexUpdate(
     }
   }
 
+  if (stopRequested) stats.cancelled = true;
   options?.onProgress?.({ stage: "done", stats });
   return stats;
 }
