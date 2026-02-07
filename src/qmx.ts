@@ -87,18 +87,21 @@ type UiOptions = {
 };
 
 function parseUiOptions(args: string[]): UiOptions {
+  const forceColor = process.env.FORCE_COLOR === "1";
   return {
-    plain: args.includes("--plain") || process.env.NO_COLOR !== undefined,
+    plain: args.includes("--plain") || (process.env.NO_COLOR !== undefined && !forceColor),
     compact: args.includes("--compact"),
     noSummary: args.includes("--no-summary"),
   };
 }
 
-function colorize(text: string, color: "cyan" | "green" | "yellow" | "dim", ui: UiOptions): string {
-  if (ui.plain || !process.stdout.isTTY) return text;
+function colorize(text: string, color: "cyan" | "green" | "yellow" | "dim" | "white", ui: UiOptions): string {
+  const forced = process.env.FORCE_COLOR === "1";
+  if (ui.plain || (!process.stdout.isTTY && !forced)) return text;
   if (color === "cyan") return `\x1b[36m${text}\x1b[0m`;
   if (color === "green") return `\x1b[32m${text}\x1b[0m`;
   if (color === "yellow") return `\x1b[33m${text}\x1b[0m`;
+  if (color === "white") return `\x1b[97m${text}\x1b[0m`;
   return `\x1b[2m${text}\x1b[0m`;
 }
 
@@ -166,15 +169,72 @@ function toCsvRow(values: string[]): string {
     .join(",");
 }
 
-function printRows(rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>): void {
+function formatScorePercent(score: number): string {
+  const n = Math.max(0, Math.min(1, score));
+  return `${Math.round(n * 100)}%`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightQuery(text: string, query: string | undefined, ui: UiOptions): string {
+  if (!query || ui.plain) return text;
+  const terms = query
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2)
+    .sort((a, b) => b.length - a.length);
+
+  if (terms.length === 0) return text;
+  const pattern = new RegExp(`(${terms.map(escapeRegExp).join("|")})`, "gi");
+  return text.replace(pattern, (m) => colorize(m, "yellow", ui));
+}
+
+function wrapText(text: string, width: number): string[] {
+  const out: string[] = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (!line) {
+      out.push("");
+      continue;
+    }
+    let rest = line;
+    while (rest.length > width) {
+      let cut = rest.lastIndexOf(" ", width);
+      if (cut < Math.floor(width * 0.5)) cut = width;
+      out.push(rest.slice(0, cut).trimEnd());
+      rest = rest.slice(cut).trimStart();
+    }
+    if (rest.length > 0) out.push(rest);
+  }
+  return out;
+}
+
+function printRows(
+  rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>,
+  ui: UiOptions,
+  query?: string
+): void {
   if (rows.length === 0) {
     console.log("Tidak ada hasil.");
     return;
   }
+  const previewWidth = Math.max(60, Math.min(120, (process.stdout.columns || 100) - 8));
   for (const row of rows) {
-    console.log(`${row.displayPath} #${row.docid} score=${row.score.toFixed(3)}`);
-    console.log(`  ${row.title}`);
-    console.log(`  ${row.snippet}`);
+    if (ui.compact) {
+      console.log(`${highlightQuery(row.displayPath, query, ui)} #${row.docid} score=${row.score.toFixed(3)}`);
+      continue;
+    }
+    console.log(colorize(`${highlightQuery(row.displayPath, query, ui)} #${row.docid}`, "cyan", ui));
+    console.log(`${colorize("Title:", "yellow", ui)} ${highlightQuery(row.title, query, ui)}`);
+    console.log(`${colorize("Score:", "yellow", ui)} ${formatScorePercent(row.score)}`);
+    const snippet = row.snippet || "-";
+    for (const line of wrapText(snippet, previewWidth)) {
+      console.log(colorize(highlightQuery(line, query, ui), "white", ui));
+    }
+    console.log(colorize("---", "dim", ui));
   }
 }
 
@@ -207,22 +267,26 @@ function renderCollectionList(
   }
 
   const totalFiles = rows.reduce((acc, row) => acc + row.fileCount, 0);
+  console.log(colorize("Collections:", "cyan", ui));
+  for (const row of rows) {
+    console.log(`${colorize(`qmx://${row.name}/`, "cyan", ui)} (${row.fileCount} files)`);
+  }
+
+  console.log("");
   console.log(colorize(`Collections (${rows.length}):`, "cyan", ui));
 
-  if (ui.compact) {
-    for (const row of rows) {
-      const updated = formatUpdatedAgo(row.updatedAt);
-      console.log(`${row.name} | qmx://${row.name}/ | files=${row.fileCount} | updated=${updated}`);
+  for (const row of rows) {
+    const updated = formatUpdatedAgo(row.updatedAt);
+    if (ui.compact) {
+      console.log(`${row.name} | pattern=${row.mask} | files=${row.fileCount} | updated=${updated}`);
+      continue;
     }
-  } else {
-    const header = `${padCell("NAME", 16)} ${padCell("URI", 24)} ${padCell("FILES", 7)} UPDATED`;
-    console.log(header);
-    console.log(`${"-".repeat(16)} ${"-".repeat(24)} ${"-".repeat(7)} ${"-".repeat(10)}`);
-    for (const row of rows) {
-      const updated = formatUpdatedAgo(row.updatedAt);
-      console.log(`${padCell(row.name, 16)} ${padCell(`qmx://${row.name}/`, 24)} ${padCell(String(row.fileCount), 7)} ${updated}`);
-      console.log(colorize(`  root=${row.rootPath}  pattern=${row.mask}`, "dim", ui));
-    }
+    console.log(colorize(`${row.name} (qmx://${row.name}/)`, "cyan", ui));
+    console.log(`Pattern: ${row.mask}`);
+    console.log(`Files:   ${row.fileCount}`);
+    console.log(`Updated: ${updated}`);
+    console.log(colorize(`Root:    ${row.rootPath}`, "dim", ui));
+    console.log("");
   }
 
   if (!ui.noSummary) {
@@ -231,7 +295,7 @@ function renderCollectionList(
   }
 }
 
-function outputRows(rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>, args: string[]): void {
+function outputRows(rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>, args: string[], query?: string): void {
   if (args.includes("--json")) {
     console.log(JSON.stringify(rows, null, 2));
     return;
@@ -265,7 +329,7 @@ function outputRows(rows: Array<{ displayPath: string; docid: string; score: num
     console.log("</results>");
     return;
   }
-  printRows(rows);
+  printRows(rows, parseUiOptions(args), query);
 }
 
 async function main() {
@@ -513,7 +577,7 @@ async function main() {
     const minScoreIdx = rest.indexOf("--min-score");
     const minScore = minScoreIdx >= 0 && minScoreIdx + 1 < rest.length ? Number(rest[minScoreIdx + 1]) || 0 : 0;
     const rows = searchDocuments(db, { query, limit: n, collection: collection || undefined, all: rest.includes("--all"), minScore });
-    outputRows(rows, rest);
+    outputRows(rows, rest, query);
     return;
   }
 
@@ -533,7 +597,7 @@ async function main() {
         all: rest.includes("--all"),
         minScore,
       });
-      outputRows(rows, rest);
+      outputRows(rows, rest, query);
     } catch (error) {
       console.error(`vsearch gagal menghubungi Ollama di ${host}: ${String(error)}`);
       process.exit(1);
@@ -561,7 +625,7 @@ async function main() {
         all: rest.includes("--all"),
         minScore,
       });
-      outputRows(rows, rest);
+      outputRows(rows, rest, query);
     } catch (error) {
       console.error(`query gagal menghubungi Ollama di ${host}: ${String(error)}`);
       process.exit(1);
@@ -589,7 +653,7 @@ async function main() {
         all: rest.includes("--all"),
         minScore,
       });
-      outputRows(rows, rest);
+      outputRows(rows, rest, query);
     } catch (error) {
       console.error(`rerank gagal menghubungi Ollama di ${host}: ${String(error)}`);
       process.exit(1);

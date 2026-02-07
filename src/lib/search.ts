@@ -16,7 +16,7 @@ export function searchDocuments(db: Database, options: SearchOptions): SearchRow
       `SELECT d.docid,
               d.display_path AS displayPath,
               d.title,
-              snippet(documents_fts, 2, '[', ']', ' ... ', 14) AS snippet,
+              snippet(documents_fts, 2, '[', ']', ' ... ', 48) AS snippet,
               bm25(documents_fts) AS bm25
        FROM documents_fts
        JOIN documents d ON CAST(d.id AS TEXT) = documents_fts.doc_id
@@ -117,7 +117,7 @@ export async function vsearchDocuments(db: Database, options: VectorSearchOption
         docid: row.docid,
         displayPath: row.displayPath,
         title: row.title,
-        snippet: row.content.slice(0, 180).replace(/\s+/g, " ").trim(),
+        snippet: row.content.slice(0, 560).replace(/\s+/g, " ").trim(),
         score,
       };
     })

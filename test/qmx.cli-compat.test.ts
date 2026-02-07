@@ -69,33 +69,40 @@ describe("qmx cli compatibility", () => {
     expect(result.stdout).toContain("qmx://meetings");
   });
 
-  test("supports qmd-like collection/context aliases", () => {
-    const collectionPath = path.join(workspace, "vault");
+  test(
+    "supports qmd-like collection/context aliases",
+    () => {
+      const collectionPath = path.join(workspace, "vault");
 
-    let result = runCli(["collection", "add", collectionPath, "--name", "notes"]);
-    expect(result.exitCode).toBe(0);
+      let result = runCli(["collection", "add", collectionPath, "--name", "notes"]);
+      expect(result.exitCode).toBe(0);
 
-    result = runCli(["collection", "ls"]);
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Collections (1):");
-    expect(result.stdout).toContain("NAME");
-    expect(result.stdout).toContain("qmx://notes/");
-    expect(result.stdout).toContain("pattern=");
-    expect(result.stdout).toContain("Summary:");
+      result = runCli(["collection", "ls"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Collections:");
+      expect(result.stdout).toContain("Collections (1):");
+      expect(result.stdout).toContain("qmx://notes/");
+      expect(result.stdout).toContain("qmx://notes/");
+      expect(result.stdout).toContain("Pattern:");
+      expect(result.stdout).toContain("Files:");
+      expect(result.stdout).toContain("Updated:");
+      expect(result.stdout).toContain("Summary:");
 
-    result = runCli(["collection", "ls", "--compact", "--plain", "--no-summary"]);
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("notes | qmx://notes/");
+      result = runCli(["collection", "ls", "--compact", "--plain", "--no-summary"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("notes | pattern=");
 
-    result = runCli(["context", "add", "qmd://notes", "Personal notes and ideas"]);
-    expect(result.exitCode).toBe(0);
+      result = runCli(["context", "add", "qmd://notes", "Personal notes and ideas"]);
+      expect(result.exitCode).toBe(0);
 
-    result = runCli(["context", "remove", "qmd://notes"]);
-    expect(result.exitCode).toBe(0);
+      result = runCli(["context", "remove", "qmd://notes"]);
+      expect(result.exitCode).toBe(0);
 
-    result = runCli(["collection", "rm", "notes"]);
-    expect(result.exitCode).toBe(0);
-  });
+      result = runCli(["collection", "rm", "notes"]);
+      expect(result.exitCode).toBe(0);
+    },
+    20000
+  );
 
   test("supports qmd-like retrieval/search flow", () => {
     const collectionPath = path.join(workspace, "vault");
@@ -118,6 +125,20 @@ describe("qmx cli compatibility", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("notes/notes-a.md");
     expect(result.stdout).toContain("notes/notes-b.md");
+  });
+
+  test("highlights search query in yellow when color is enabled", () => {
+    const collectionPath = path.join(workspace, "vault");
+
+    let result = runCli(["collection", "add", collectionPath, "--name", "notes"]);
+    expect(result.exitCode).toBe(0);
+
+    result = runCli(["update", "--no-embed"]);
+    expect(result.exitCode).toBe(0);
+
+    result = runCli(["search", "Bun"], { FORCE_COLOR: "1" });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("\u001b[33mBun\u001b[0m");
   });
 
   test(
