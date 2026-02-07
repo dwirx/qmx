@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { sqliteVecState } from "./db";
 import { embedText, expandQuery, rerankDocuments } from "./ollama";
 import type { DocumentRow, GetOptions, HybridRow, SearchOptions, SearchRow, VectorSearchOptions } from "./types";
 import { cosineSimilarity, safeSearchQuery, withLines } from "./utils";
@@ -50,6 +51,41 @@ export async function vsearchDocuments(db: Database, options: VectorSearchOption
   const collection = options.collection ?? "";
 
   const queryEmbedding = await embedText(options.query, options.host, options.model);
+  const vecRuntime = sqliteVecState(db);
+
+  if (vecRuntime.enabled) {
+    try {
+      const queryVec = JSON.stringify(queryEmbedding);
+      const rows = db
+        .query(
+          `SELECT d.docid,
+                  d.display_path AS displayPath,
+                  d.title,
+                  substr(replace(replace(d.content, char(10), ' '), char(13), ' '), 1, 180) AS snippet,
+                  (1.0 - vec_distance_cosine(vec_f32(d.embedding), vec_f32(?))) AS score
+           FROM documents d
+           JOIN collections c ON c.id = d.collection_id
+           WHERE d.embedding IS NOT NULL
+             AND (? = '' OR c.name = ?)
+           ORDER BY score DESC, d.display_path ASC
+           LIMIT ?`
+        )
+        .all(queryVec, collection, collection, limit) as Array<{
+        docid: string;
+        displayPath: string;
+        title: string;
+        snippet: string;
+        score: number;
+      }>;
+
+      return rows
+        .filter((row) => Number.isFinite(row.score) && row.score >= minScore)
+        .map((row) => ({ ...row, snippet: row.snippet.trim() }));
+    } catch {
+      // fallback to JS cosine implementation below
+    }
+  }
+
   const candidates = db
     .query(
       `SELECT d.docid, d.display_path AS displayPath, d.title, d.content, d.embedding

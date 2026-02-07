@@ -15,7 +15,7 @@ import {
   DEFAULT_RERANKER_MODEL,
   doctorChecks,
   getDocument,
-  listCollections,
+  listCollectionSummaries,
   listContexts,
   loadConfig,
   lsCollection,
@@ -30,9 +30,11 @@ import {
   runIndexUpdate,
   searchDocuments,
   setConfigValue,
+  sqliteVecState,
   statusInfo,
   vsearchDocuments,
 } from "./lib/api";
+import { runMcpServer } from "./lib/mcp";
 
 function printHelp(): void {
   console.log(`QMX - Query Markup Experience
@@ -49,6 +51,7 @@ Commands:
   qmx context add <target> <text>
   qmx context list
   qmx context rm <target>
+  qmx setup [--notes <path>] [--meetings <path>] [--docs <path>] [--mask <glob>] [--no-embed]
 
   qmx config set-host <url>
   qmx config set-model <name>
@@ -57,14 +60,18 @@ Commands:
   qmx config get
 
   qmx update [--no-embed] [--host <url>] [--model <name>]
+  qmx index [--no-embed] [--host <url>] [--model <name>]
   qmx embed [--host <url>] [--model <name>] [-f]
+  qmx vector [--host <url>] [--model <name>] [-f]
   qmx cleanup
   qmx ls [collection[/prefix]]
   qmx search <query> [-n <num>] [-c <collection>] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
   qmx vsearch <query> [-n <num>] [-c <collection>] [--host <url>] [--model <name>] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
   qmx query <query> [-n <num>] [-c <collection>] [--host <url>] [--model <name>] [--expander-model <name>] [--reranker-model <name>] [--no-expand] [--no-rerank] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
+  qmx rerank <query> [-n <num>] [-c <collection>] [--host <url>] [--model <name>] [--expander-model <name>] [--reranker-model <name>] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
   qmx get <path|#docid> [-l <lines>] [--from <line>] [--line-numbers]
   qmx multi-get <pattern|list|docids> [-l <lines>] [--max-bytes <num>] [--json]
+  qmx mcp
   qmx status
   qmx doctor
 
@@ -142,6 +149,20 @@ function printRows(rows: Array<{ displayPath: string; docid: string; score: numb
     console.log(`  ${row.title}`);
     console.log(`  ${row.snippet}`);
   }
+}
+
+function formatUpdatedAgo(timestamp: string | null): string {
+  if (!timestamp) return "-";
+  const ms = Date.parse(timestamp);
+  if (!Number.isFinite(ms)) return timestamp;
+  const diffMs = Date.now() - ms;
+  if (diffMs < 60_000) return "just now";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function outputRows(rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>, args: string[]): void {
@@ -247,7 +268,8 @@ async function main() {
   }
 
   if (command === "collection") {
-    const [sub, ...subArgs] = rest;
+    const [rawSub, ...subArgs] = rest;
+    const sub = rawSub === "ls" ? "list" : rawSub === "rm" ? "remove" : rawSub;
     if (sub === "add") {
       const rootPath = requireValue(subArgs[0], "Usage: qmx collection add <path> --name <name> [--mask <glob>]");
       const name = parseFlagString(subArgs, "-n", "--name");
@@ -261,9 +283,17 @@ async function main() {
       return;
     }
     if (sub === "list") {
-      const rows = listCollections(db);
-      if (rows.length === 0) return console.log("Belum ada collection.");
-      for (const row of rows) console.log(`${row.name}\t${row.rootPath}\tmask=${row.mask}`);
+      const rows = listCollectionSummaries(db);
+      if (rows.length === 0) return console.log("Collections: belum ada.");
+      console.log(`Collections (${rows.length}):`);
+      for (const row of rows) {
+        console.log("");
+        console.log(`${row.name} (qmx://${row.name}/)`);
+        console.log(`  Root:    ${row.rootPath}`);
+        console.log(`  Pattern: ${row.mask}`);
+        console.log(`  Files:   ${row.fileCount}`);
+        console.log(`  Updated: ${formatUpdatedAgo(row.updatedAt)}`);
+      }
       return;
     }
     if (sub === "remove") {
@@ -284,7 +314,8 @@ async function main() {
   }
 
   if (command === "context") {
-    const [sub, ...subArgs] = rest;
+    const [rawSub, ...subArgs] = rest;
+    const sub = rawSub === "remove" ? "rm" : rawSub;
     if (sub === "add") {
       const target = requireValue(subArgs[0], "Usage: qmx context add <target> <text>");
       const text = requireValue(subArgs[1], "Usage: qmx context add <target> <text>");
@@ -308,14 +339,45 @@ async function main() {
     process.exit(1);
   }
 
-  if (command === "update") {
+  if (command === "setup") {
+    const notesPath = parseFlagString(rest, null, "--notes", "");
+    const meetingsPath = parseFlagString(rest, null, "--meetings", "");
+    const docsPath = parseFlagString(rest, null, "--docs", "");
+    const mask = parseFlagString(rest, null, "--mask", "**/*.md");
+    const doEmbed = !rest.includes("--no-embed");
+
+    const entries = [
+      { name: "notes", rootPath: notesPath, context: "Personal notes and ideas" },
+      { name: "meetings", rootPath: meetingsPath, context: "Meeting transcripts and notes" },
+      { name: "docs", rootPath: docsPath, context: "Work documentation" },
+    ].filter((entry) => entry.rootPath);
+
+    if (entries.length === 0) {
+      console.error("Usage: qmx setup [--notes <path>] [--meetings <path>] [--docs <path>] [--mask <glob>] [--no-embed]");
+      process.exit(1);
+    }
+
+    for (const entry of entries) {
+      addCollection(db, { name: entry.name, rootPath: entry.rootPath, mask });
+      addContext(db, { target: `qmx://${entry.name}`, value: entry.context });
+      console.log(`Collection '${entry.name}' + context 'qmx://${entry.name}' siap.`);
+    }
+
+    const stats = await runIndexUpdate(db, { embed: doEmbed, host, model });
+    console.log(
+      `Setup selesai | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed} embed=${doEmbed ? "on" : "off"}`
+    );
+    return;
+  }
+
+  if (command === "update" || command === "index") {
     const embed = !rest.includes("--no-embed");
     const stats = await runIndexUpdate(db, { embed, host, model });
     console.log(`Index updated | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed}`);
     return;
   }
 
-  if (command === "embed") {
+  if (command === "embed" || command === "vector") {
     const force = rest.includes("-f") || rest.includes("--force");
     if (force) {
       const cleared = clearEmbeddings(db);
@@ -437,6 +499,34 @@ async function main() {
     return;
   }
 
+  if (command === "rerank") {
+    const query = requireValue(rest[0], "Usage: qmx rerank <query>");
+    const n = parseFlagNumber(rest, "-n", 5);
+    const collection = parseFlagString(rest, "-c", "--collection", "");
+    const minScoreIdx = rest.indexOf("--min-score");
+    const minScore = minScoreIdx >= 0 && minScoreIdx + 1 < rest.length ? Number(rest[minScoreIdx + 1]) || 0 : 0;
+    try {
+      const rows = await queryDocuments(db, {
+        query,
+        limit: n,
+        collection: collection || undefined,
+        host,
+        model,
+        expanderModel,
+        rerankerModel,
+        noExpand: true,
+        noRerank: false,
+        all: rest.includes("--all"),
+        minScore,
+      });
+      outputRows(rows, rest);
+    } catch (error) {
+      console.error(`rerank gagal menghubungi Ollama di ${host}: ${String(error)}`);
+      process.exit(1);
+    }
+    return;
+  }
+
   if (command === "get") {
     const refInput = requireValue(rest[0], "Usage: qmx get <path|#docid> [-l <lines>] [--from <line>] [--line-numbers]");
     const parsedRef = parseRefWithLine(refInput);
@@ -478,6 +568,7 @@ async function main() {
 
   if (command === "status") {
     const info = statusInfo(db);
+    const vec = sqliteVecState(db);
     console.log("QMX status: active");
     console.log(`Runtime: Bun ${Bun.version}`);
     console.log(`DB: ${dbPath}`);
@@ -490,6 +581,12 @@ async function main() {
     console.log(`Embed model: ${model}`);
     console.log(`Expander model: ${expanderModel}`);
     console.log(`Reranker model: ${rerankerModel}`);
+    console.log(`sqlite-vec: ${vec.enabled ? "enabled" : "disabled"} (${vec.message})`);
+    return;
+  }
+
+  if (command === "mcp") {
+    await runMcpServer({ db, host, model });
     return;
   }
 

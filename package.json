@@ -7,9 +7,30 @@
     "qmx": "qmx"
   },
   "scripts": {
+    "index": "bun src/qmx.ts index",
+    "vector": "bun src/qmx.ts vector",
+    "search": "bun src/qmx.ts search",
+    "vsearch": "bun src/qmx.ts vsearch",
+    "rerank": "bun src/qmx.ts rerank",
+    "mcp": "bun src/qmx.ts mcp",
+    "link": "bun link",
+    "inspector": "npx @modelcontextprotocol/inspector bun src/qmx.ts mcp",
     "start": "bun src/qmx.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "sqlite-vec": "^0.1.7-alpha.2",
+    "yaml": "^2.8.2",
+    "zod": "^4.2.1"
+  },
+  "optionalDependencies": {
+    "sqlite-vec-darwin-arm64": "^0.1.7-alpha.2",
+    "sqlite-vec-darwin-x64": "^0.1.7-alpha.2",
+    "sqlite-vec-linux-arm64": "^0.1.7-alpha.2",
+    "sqlite-vec-linux-x64": "^0.1.7-alpha.2",
+    "sqlite-vec-windows-x64": "^0.1.7-alpha.2"
   },
   "devDependencies": {
     "@types/bun": "latest"

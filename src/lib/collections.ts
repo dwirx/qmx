@@ -2,9 +2,18 @@ import { Database } from "bun:sqlite";
 import path from "node:path";
 import type { CollectionInput, CollectionRow, ContextInput } from "./types";
 
+function expandHomePath(inputPath: string): string {
+  if (!inputPath.startsWith("~")) return inputPath;
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (!home) return inputPath;
+  if (inputPath === "~") return home;
+  if (inputPath.startsWith("~/")) return path.join(home, inputPath.slice(2));
+  return inputPath;
+}
+
 export function addCollection(db: Database, input: CollectionInput): void {
   const mask = input.mask?.trim() || "**/*.md";
-  const rootPath = path.resolve(input.rootPath);
+  const rootPath = path.resolve(expandHomePath(input.rootPath));
   db.query(
     `INSERT INTO collections(name, root_path, mask) VALUES(?, ?, ?)
      ON CONFLICT(name) DO UPDATE SET root_path = excluded.root_path, mask = excluded.mask`
@@ -35,6 +44,24 @@ export function listCollections(db: Database): CollectionRow[] {
        ORDER BY name`
     )
     .all() as CollectionRow[];
+}
+
+export function listCollectionSummaries(
+  db: Database
+): Array<{ name: string; rootPath: string; mask: string; fileCount: number; updatedAt: string | null }> {
+  return db
+    .query(
+      `SELECT c.name,
+              c.root_path AS rootPath,
+              c.mask,
+              COUNT(d.id) AS fileCount,
+              MAX(d.updated_at) AS updatedAt
+       FROM collections c
+       LEFT JOIN documents d ON d.collection_id = c.id
+       GROUP BY c.id, c.name, c.root_path, c.mask
+       ORDER BY c.name`
+    )
+    .all() as Array<{ name: string; rootPath: string; mask: string; fileCount: number; updatedAt: string | null }>;
 }
 
 export function addContext(db: Database, input: ContextInput): void {

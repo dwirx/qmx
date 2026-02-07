@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadConfig, setConfigValue } from "../src/lib/config";
+import { configPath, loadConfig, setConfigValue } from "../src/lib/config";
 import { resolveOllamaHost } from "../src/lib/ollama";
 
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
@@ -31,10 +31,26 @@ describe("config host resolution", () => {
     expect(cfg.embedModel).toBe("nomic-embed-text");
     expect(cfg.expanderModel).toBe("hf.co/tobil/qmd-query-expansion-1.7B-gguf:Q4_K_M");
     expect(cfg.rerankerModel).toBe("fanyx/Qwen3-Reranker-0.6B-Q8_0:latest");
+
+    const raw = readFileSync(configPath(), "utf8");
+    expect(raw).toContain("ollamaHost:");
+    expect(configPath().endsWith("config.yaml")).toBe(true);
   });
 
   test("normalizes host with missing scheme", () => {
     const host = resolveOllamaHost("172.20.32.1:11434");
     expect(host).toBe("http://172.20.32.1:11434");
+  });
+
+  test("returns empty config on invalid yaml", () => {
+    configRoot = mkdtempSync(path.join(tmpdir(), "qmx-cfg-"));
+    process.env.XDG_CONFIG_HOME = configRoot;
+
+    const cfgDir = path.join(configRoot, "qmx");
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(path.join(cfgDir, "config.yaml"), "ollamaHost: [broken");
+
+    const cfg = loadConfig();
+    expect(cfg).toEqual({});
   });
 });

@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import YAML from "yaml";
+import { z } from "zod";
 
 export type QmxConfig = {
   ollamaHost?: string;
@@ -9,21 +11,38 @@ export type QmxConfig = {
   rerankerModel?: string;
 };
 
+const QmxConfigSchema = z
+  .object({
+    ollamaHost: z.string().trim().min(1).optional(),
+    embedModel: z.string().trim().min(1).optional(),
+    expanderModel: z.string().trim().min(1).optional(),
+    rerankerModel: z.string().trim().min(1).optional(),
+  })
+  .strip();
+
 function configDir(): string {
   return process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "qmx") : path.join(homedir(), ".config", "qmx");
 }
 
 export function configPath(): string {
+  return path.join(configDir(), "config.yaml");
+}
+
+function legacyConfigPath(): string {
   return path.join(configDir(), "config.json");
 }
 
 export function loadConfig(): QmxConfig {
-  const cfgPath = configPath();
-  if (!existsSync(cfgPath)) return {};
+  const yamlPath = configPath();
+  const jsonPath = legacyConfigPath();
+  if (!existsSync(yamlPath) && !existsSync(jsonPath)) return {};
+
+  const targetPath = existsSync(yamlPath) ? yamlPath : jsonPath;
   try {
-    const raw = readFileSync(cfgPath, "utf8");
-    const parsed = JSON.parse(raw) as QmxConfig;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    const raw = readFileSync(targetPath, "utf8");
+    const parsed = targetPath.endsWith(".yaml") ? YAML.parse(raw) : JSON.parse(raw);
+    const result = QmxConfigSchema.safeParse(parsed ?? {});
+    return result.success ? result.data : {};
   } catch {
     return {};
   }
@@ -32,7 +51,9 @@ export function loadConfig(): QmxConfig {
 export function saveConfig(cfg: QmxConfig): void {
   const dir = configDir();
   mkdirSync(dir, { recursive: true });
-  writeFileSync(configPath(), JSON.stringify(cfg, null, 2));
+  const parsed = QmxConfigSchema.safeParse(cfg);
+  const safeConfig = parsed.success ? parsed.data : {};
+  writeFileSync(configPath(), YAML.stringify(safeConfig));
 }
 
 export function setConfigValue(

@@ -1,4 +1,52 @@
 import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { load as loadSqliteVec } from "sqlite-vec";
+
+type SqliteVecState = {
+  enabled: boolean;
+  message: string;
+};
+
+const vecStateByDb = new WeakMap<Database, SqliteVecState>();
+
+function fallbackVecExtensionPath(): string | null {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const platform = process.platform;
+  const arch = process.arch;
+  const candidates: string[] = [];
+
+  if (platform === "linux" && arch === "x64") candidates.push("node_modules/sqlite-vec-linux-x64/vec0.so");
+  if (platform === "linux" && arch === "arm64") candidates.push("node_modules/sqlite-vec-linux-arm64/vec0.so");
+  if (platform === "darwin" && arch === "x64") candidates.push("node_modules/sqlite-vec-darwin-x64/vec0.dylib");
+  if (platform === "darwin" && arch === "arm64") candidates.push("node_modules/sqlite-vec-darwin-arm64/vec0.dylib");
+  if (platform === "win32" && arch === "x64") candidates.push("node_modules/sqlite-vec-windows-x64/vec0.dll");
+
+  for (const rel of candidates) {
+    const full = path.join(root, rel);
+    if (existsSync(full)) return full;
+  }
+  return null;
+}
+
+function enableSqliteVec(db: Database): SqliteVecState {
+  try {
+    loadSqliteVec(db);
+    const version = db.query("SELECT vec_version() AS version").get() as { version: string };
+    return { enabled: true, message: `loaded (${version.version || "unknown"})` };
+  } catch {
+    const fallback = fallbackVecExtensionPath();
+    if (!fallback) return { enabled: false, message: "extension not available for current platform" };
+    try {
+      db.loadExtension(fallback);
+      const version = db.query("SELECT vec_version() AS version").get() as { version: string };
+      return { enabled: true, message: `loaded (${version.version || "unknown"})` };
+    } catch (error) {
+      return { enabled: false, message: `failed to load: ${String(error)}` };
+    }
+  }
+}
 
 export function openQmxDb(dbPath: string): Database {
   const db = new Database(dbPath, { create: true });
@@ -57,7 +105,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
   if (!names.has("embedding_model")) db.exec("ALTER TABLE documents ADD COLUMN embedding_model TEXT;");
   if (!names.has("embedded_at")) db.exec("ALTER TABLE documents ADD COLUMN embedded_at TEXT;");
 
+  vecStateByDb.set(db, enableSqliteVec(db));
+
   return db;
+}
+
+export function sqliteVecState(db: Database): SqliteVecState {
+  return vecStateByDb.get(db) || { enabled: false, message: "not initialized" };
 }
 
 export function rebuildFts(db: Database): void {
@@ -106,6 +160,8 @@ export function doctorChecks(db: Database): Array<{ check: string; ok: boolean; 
   } catch (error) {
     checks.push({ check: "fts5", ok: false, message: `FTS5 error: ${String(error)}` });
   }
+  const vec = sqliteVecState(db);
+  checks.push({ check: "sqlite-vec", ok: vec.enabled, message: vec.message });
   checks.push({ check: "ollama", ok: true, message: "Ollama integration enabled via OLLAMA_HOST" });
   return checks;
 }
