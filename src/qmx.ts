@@ -44,7 +44,7 @@ Usage:
 
 Commands:
   qmx collection add <path> --name <name> [--mask <glob>]
-  qmx collection list
+  qmx collection list [--plain] [--compact] [--no-summary]
   qmx collection remove <name>
   qmx collection rename <old> <new>
 
@@ -61,8 +61,8 @@ Commands:
 
   qmx update [--no-embed] [--host <url>] [--model <name>]
   qmx index [--no-embed] [--host <url>] [--model <name>]
-  qmx embed [--host <url>] [--model <name>] [-f]
-  qmx vector [--host <url>] [--model <name>] [-f]
+  qmx embed [--host <url>] [--model <name>] [-f] [--plain] [--compact] [--no-summary]
+  qmx vector [--host <url>] [--model <name>] [-f] [--plain] [--compact] [--no-summary]
   qmx cleanup
   qmx ls [collection[/prefix]]
   qmx search <query> [-n <num>] [-c <collection>] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
@@ -78,6 +78,33 @@ Commands:
 Global options:
   --index <name>  Use named DB index (default: index.sqlite)
 `);
+}
+
+type UiOptions = {
+  plain: boolean;
+  compact: boolean;
+  noSummary: boolean;
+};
+
+function parseUiOptions(args: string[]): UiOptions {
+  return {
+    plain: args.includes("--plain") || process.env.NO_COLOR !== undefined,
+    compact: args.includes("--compact"),
+    noSummary: args.includes("--no-summary"),
+  };
+}
+
+function colorize(text: string, color: "cyan" | "green" | "yellow" | "dim", ui: UiOptions): string {
+  if (ui.plain || !process.stdout.isTTY) return text;
+  if (color === "cyan") return `\x1b[36m${text}\x1b[0m`;
+  if (color === "green") return `\x1b[32m${text}\x1b[0m`;
+  if (color === "yellow") return `\x1b[33m${text}\x1b[0m`;
+  return `\x1b[2m${text}\x1b[0m`;
+}
+
+function padCell(value: string, width: number): string {
+  if (value.length >= width) return value.slice(0, width);
+  return value.padEnd(width, " ");
 }
 
 function parseGlobalIndex(args: string[]): { args: string[]; indexName: string } {
@@ -163,6 +190,45 @@ function formatUpdatedAgo(timestamp: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function renderCollectionList(
+  rows: Array<{ name: string; rootPath: string; mask: string; fileCount: number; updatedAt: string | null }>,
+  ui: UiOptions
+): void {
+  if (rows.length === 0) {
+    console.log("Collections: belum ada.");
+    return;
+  }
+
+  const totalFiles = rows.reduce((acc, row) => acc + row.fileCount, 0);
+  console.log(colorize(`Collections (${rows.length}):`, "cyan", ui));
+
+  if (ui.compact) {
+    for (const row of rows) {
+      const updated = formatUpdatedAgo(row.updatedAt);
+      console.log(`${row.name} | qmx://${row.name}/ | files=${row.fileCount} | updated=${updated}`);
+    }
+  } else {
+    const header = `${padCell("NAME", 16)} ${padCell("URI", 24)} ${padCell("FILES", 7)} UPDATED`;
+    console.log(header);
+    console.log(`${"-".repeat(16)} ${"-".repeat(24)} ${"-".repeat(7)} ${"-".repeat(10)}`);
+    for (const row of rows) {
+      const updated = formatUpdatedAgo(row.updatedAt);
+      console.log(`${padCell(row.name, 16)} ${padCell(`qmx://${row.name}/`, 24)} ${padCell(String(row.fileCount), 7)} ${updated}`);
+      console.log(colorize(`  root=${row.rootPath}  pattern=${row.mask}`, "dim", ui));
+    }
+  }
+
+  if (!ui.noSummary) {
+    const summary = `Summary: collections=${rows.length} files=${totalFiles}`;
+    console.log(colorize(summary, "green", ui));
+  }
 }
 
 function outputRows(rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>, args: string[]): void {
@@ -284,16 +350,7 @@ async function main() {
     }
     if (sub === "list") {
       const rows = listCollectionSummaries(db);
-      if (rows.length === 0) return console.log("Collections: belum ada.");
-      console.log(`Collections (${rows.length}):`);
-      for (const row of rows) {
-        console.log("");
-        console.log(`${row.name} (qmx://${row.name}/)`);
-        console.log(`  Root:    ${row.rootPath}`);
-        console.log(`  Pattern: ${row.mask}`);
-        console.log(`  Files:   ${row.fileCount}`);
-        console.log(`  Updated: ${formatUpdatedAgo(row.updatedAt)}`);
-      }
+      renderCollectionList(rows, parseUiOptions(subArgs));
       return;
     }
     if (sub === "remove") {
@@ -378,6 +435,8 @@ async function main() {
   }
 
   if (command === "embed" || command === "vector") {
+    const ui = parseUiOptions(rest);
+    const startedAt = Date.now();
     const force = rest.includes("-f") || rest.includes("--force");
     if (force) {
       const cleared = clearEmbeddings(db);
@@ -390,19 +449,29 @@ async function main() {
       model,
       onProgress: (event) => {
         if (event.stage === "plan") {
-          const lines = buildEmbedIntro({
-            documents: event.documents,
-            chunks: event.chunks,
-            bytes: event.bytes,
-            splitDocuments: event.splitDocuments,
-            model: event.model,
-          });
-          for (const line of lines) console.log(line);
+          if (ui.compact) {
+            console.log(`Embed plan | docs=${event.documents} chunks=${event.chunks} model=${event.model}`);
+          } else {
+            console.log(colorize("Embed Plan", "cyan", ui));
+            const lines = buildEmbedIntro({
+              documents: event.documents,
+              chunks: event.chunks,
+              bytes: event.bytes,
+              splitDocuments: event.splitDocuments,
+              model: event.model,
+            });
+            for (const line of lines) console.log(`  ${line}`);
+          }
           printedHeader = true;
           return;
         }
         if (event.stage === "doc") {
-          console.log(`[${event.index}/${event.total}] embedded ${event.displayPath} (${event.chunks} chunks)`);
+          const percent = event.total > 0 ? Math.round((event.index / event.total) * 100) : 0;
+          if (ui.compact) {
+            console.log(`[${event.index}/${event.total}] ${event.displayPath} (${event.chunks} chunks)`);
+          } else {
+            console.log(`[${padCell(`${percent}%`, 4)}] [${event.index}/${event.total}] ${event.displayPath} (${event.chunks} chunks)`);
+          }
         }
       },
     });
@@ -416,9 +485,10 @@ async function main() {
       });
       for (const line of lines) console.log(line);
     }
-    console.log(
-      `Embed selesai | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed} embedded_docs=${stats.embeddedDocs} embedded_chunks=${stats.embeddedChunks}`
-    );
+    const duration = formatDurationMs(Date.now() - startedAt);
+    const finalLine = `Embed selesai | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed} embedded_docs=${stats.embeddedDocs} embedded_chunks=${stats.embeddedChunks}`;
+    console.log(colorize(finalLine, "green", ui));
+    if (!ui.noSummary) console.log(colorize(`Duration: ${duration}`, "dim", ui));
     return;
   }
 

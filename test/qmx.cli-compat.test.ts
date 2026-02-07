@@ -78,10 +78,14 @@ describe("qmx cli compatibility", () => {
     result = runCli(["collection", "ls"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Collections (1):");
-    expect(result.stdout).toContain("notes (qmx://notes/)");
-    expect(result.stdout).toContain("Pattern:");
-    expect(result.stdout).toContain("Files:");
-    expect(result.stdout).toContain("Updated:");
+    expect(result.stdout).toContain("NAME");
+    expect(result.stdout).toContain("qmx://notes/");
+    expect(result.stdout).toContain("pattern=");
+    expect(result.stdout).toContain("Summary:");
+
+    result = runCli(["collection", "ls", "--compact", "--plain", "--no-summary"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("notes | qmx://notes/");
 
     result = runCli(["context", "add", "qmd://notes", "Personal notes and ideas"]);
     expect(result.exitCode).toBe(0);
