@@ -1,0 +1,6 @@
+{
+  "ollamaHost": "http://172.20.32.1:11434",
+  "embedModel": "embeddinggemma:latest",
+  "expanderModel": "hf.co/tobil/qmd-query-expansion-1.7B-gguf:Q4_K_M",
+  "rerankerModel": "fanyx/Qwen3-Reranker-0.6B-Q8_0:latest"
+}

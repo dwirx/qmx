@@ -1,0 +1,509 @@
+#!/usr/bin/env bun
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import {
+  addCollection,
+  addContext,
+  buildEmbedIntro,
+  cleanupDb,
+  clearEmbeddings,
+  configPath,
+  DEFAULT_EMBED_MODEL,
+  DEFAULT_EXPANDER_MODEL,
+  DEFAULT_OLLAMA_HOST,
+  DEFAULT_RERANKER_MODEL,
+  doctorChecks,
+  getDocument,
+  listCollections,
+  listContexts,
+  loadConfig,
+  lsCollection,
+  multiGetDocuments,
+  openQmxDb,
+  queryDocuments,
+  rebuildFts,
+  removeCollection,
+  removeContext,
+  renameCollection,
+  resolveOllamaHost,
+  runIndexUpdate,
+  searchDocuments,
+  setConfigValue,
+  statusInfo,
+  vsearchDocuments,
+} from "./lib/api";
+
+function printHelp(): void {
+  console.log(`QMX - Query Markup Experience
+
+Usage:
+  qmx <command> [options]
+
+Commands:
+  qmx collection add <path> --name <name> [--mask <glob>]
+  qmx collection list
+  qmx collection remove <name>
+  qmx collection rename <old> <new>
+
+  qmx context add <target> <text>
+  qmx context list
+  qmx context rm <target>
+
+  qmx config set-host <url>
+  qmx config set-model <name>
+  qmx config set-expander <name>
+  qmx config set-reranker <name>
+  qmx config get
+
+  qmx update [--no-embed] [--host <url>] [--model <name>]
+  qmx embed [--host <url>] [--model <name>] [-f]
+  qmx cleanup
+  qmx ls [collection[/prefix]]
+  qmx search <query> [-n <num>] [-c <collection>] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
+  qmx vsearch <query> [-n <num>] [-c <collection>] [--host <url>] [--model <name>] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
+  qmx query <query> [-n <num>] [-c <collection>] [--host <url>] [--model <name>] [--expander-model <name>] [--reranker-model <name>] [--no-expand] [--no-rerank] [--json|--files|--csv|--md|--xml] [--all] [--min-score <num>]
+  qmx get <path|#docid> [-l <lines>] [--from <line>] [--line-numbers]
+  qmx multi-get <pattern|list|docids> [-l <lines>] [--max-bytes <num>] [--json]
+  qmx status
+  qmx doctor
+
+Global options:
+  --index <name>  Use named DB index (default: index.sqlite)
+`);
+}
+
+function parseGlobalIndex(args: string[]): { args: string[]; indexName: string } {
+  const next = [...args];
+  let indexName = "index";
+  const idx = next.indexOf("--index");
+  if (idx >= 0 && idx + 1 < next.length) {
+    indexName = next[idx + 1] || "index";
+    next.splice(idx, 2);
+  }
+  return { args: next, indexName };
+}
+
+function getDbPath(indexName: string): string {
+  const base = process.env.XDG_CACHE_HOME ? path.join(process.env.XDG_CACHE_HOME, "qmx") : path.join(homedir(), ".cache", "qmx");
+  mkdirSync(base, { recursive: true });
+  return path.join(base, `${indexName}.sqlite`);
+}
+
+function requireValue(value: string | undefined, message: string): string {
+  if (!value) {
+    console.error(message);
+    process.exit(1);
+  }
+  return value;
+}
+
+function parseFlagNumber(args: string[], flag: string, fallback: number): number {
+  const idx = args.indexOf(flag);
+  if (idx < 0 || idx + 1 >= args.length) return fallback;
+  const n = Number(args[idx + 1]);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
+}
+
+function parseFlagString(args: string[], shortFlag: string | null, longFlag: string, fallback = ""): string {
+  if (shortFlag) {
+    const shortIdx = args.indexOf(shortFlag);
+    if (shortIdx >= 0 && shortIdx + 1 < args.length) return args[shortIdx + 1] || fallback;
+  }
+  const longIdx = args.indexOf(longFlag);
+  if (longIdx >= 0 && longIdx + 1 < args.length) return args[longIdx + 1] || fallback;
+  return fallback;
+}
+
+function parseRefWithLine(rawRef: string): { ref: string; fromLine: number } {
+  if (rawRef.startsWith("#")) return { ref: rawRef, fromLine: 1 };
+  const match = rawRef.match(/^(.*):(\d+)$/);
+  if (!match) return { ref: rawRef, fromLine: 1 };
+  return { ref: match[1] ?? rawRef, fromLine: Number(match[2]) };
+}
+
+function toCsvRow(values: string[]): string {
+  return values
+    .map((v) => {
+      if (v.includes(",") || v.includes('"') || v.includes("\n")) return `"${v.replaceAll('"', '""')}"`;
+      return v;
+    })
+    .join(",");
+}
+
+function printRows(rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>): void {
+  if (rows.length === 0) {
+    console.log("Tidak ada hasil.");
+    return;
+  }
+  for (const row of rows) {
+    console.log(`${row.displayPath} #${row.docid} score=${row.score.toFixed(3)}`);
+    console.log(`  ${row.title}`);
+    console.log(`  ${row.snippet}`);
+  }
+}
+
+function outputRows(rows: Array<{ displayPath: string; docid: string; score: number; title: string; snippet: string }>, args: string[]): void {
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (args.includes("--files")) {
+    for (const row of rows) console.log(`${row.docid},${row.score.toFixed(4)},${row.displayPath},${row.title}`);
+    return;
+  }
+  if (args.includes("--csv")) {
+    console.log(toCsvRow(["docid", "score", "path", "title", "snippet"]));
+    for (const row of rows) console.log(toCsvRow([row.docid, row.score.toFixed(4), row.displayPath, row.title, row.snippet]));
+    return;
+  }
+  if (args.includes("--md")) {
+    for (const row of rows) {
+      console.log(`- **${row.displayPath}** (#${row.docid}) score=${row.score.toFixed(4)}`);
+      console.log(`  - ${row.title}`);
+      console.log(`  - ${row.snippet}`);
+    }
+    return;
+  }
+  if (args.includes("--xml")) {
+    console.log("<results>");
+    for (const row of rows) {
+      console.log(`  <result docid=\"${row.docid}\" score=\"${row.score.toFixed(4)}\">`);
+      console.log(`    <path>${row.displayPath}</path>`);
+      console.log(`    <title>${row.title}</title>`);
+      console.log(`    <snippet>${row.snippet}</snippet>`);
+      console.log("  </result>");
+    }
+    console.log("</results>");
+    return;
+  }
+  printRows(rows);
+}
+
+async function main() {
+  const parsed = parseGlobalIndex(process.argv.slice(2));
+  const args = parsed.args;
+  const dbPath = getDbPath(parsed.indexName);
+  const db = openQmxDb(dbPath);
+  const cfg = loadConfig();
+
+  const [command, ...rest] = args;
+  if (!command || command === "help" || command === "--help" || command === "-h") {
+    printHelp();
+    return;
+  }
+
+  const host = resolveOllamaHost(parseFlagString(rest, null, "--host", ""), cfg.ollamaHost || DEFAULT_OLLAMA_HOST);
+  const model = parseFlagString(rest, null, "--model", cfg.embedModel || DEFAULT_EMBED_MODEL);
+  const expanderModel = parseFlagString(rest, null, "--expander-model", cfg.expanderModel || DEFAULT_EXPANDER_MODEL);
+  const rerankerModel = parseFlagString(rest, null, "--reranker-model", cfg.rerankerModel || DEFAULT_RERANKER_MODEL);
+
+  if (command === "config") {
+    const [sub, ...subArgs] = rest;
+    if (sub === "set-host") {
+      const raw = requireValue(subArgs[0], "Usage: qmx config set-host <url>");
+      const normalized = resolveOllamaHost(raw);
+      setConfigValue("ollamaHost", normalized);
+      console.log(`Ollama host tersimpan: ${normalized}`);
+      console.log(`Config: ${configPath()}`);
+      return;
+    }
+    if (sub === "set-model") {
+      const m = requireValue(subArgs[0], "Usage: qmx config set-model <name>");
+      setConfigValue("embedModel", m);
+      console.log(`Embedding model tersimpan: ${m}`);
+      console.log(`Config: ${configPath()}`);
+      return;
+    }
+    if (sub === "set-expander") {
+      const m = requireValue(subArgs[0], "Usage: qmx config set-expander <name>");
+      setConfigValue("expanderModel", m);
+      console.log(`Expander model tersimpan: ${m}`);
+      console.log(`Config: ${configPath()}`);
+      return;
+    }
+    if (sub === "set-reranker") {
+      const m = requireValue(subArgs[0], "Usage: qmx config set-reranker <name>");
+      setConfigValue("rerankerModel", m);
+      console.log(`Reranker model tersimpan: ${m}`);
+      console.log(`Config: ${configPath()}`);
+      return;
+    }
+    if (sub === "get" || !sub) {
+      console.log(`Config file: ${configPath()}`);
+      console.log(`ollamaHost: ${cfg.ollamaHost || "(default)"}`);
+      console.log(`embedModel: ${cfg.embedModel || "(default)"}`);
+      console.log(`expanderModel: ${cfg.expanderModel || "(default)"}`);
+      console.log(`rerankerModel: ${cfg.rerankerModel || "(default)"}`);
+      console.log(`effectiveHost: ${host}`);
+      console.log(`effectiveModel: ${model}`);
+      console.log(`effectiveExpanderModel: ${expanderModel}`);
+      console.log(`effectiveRerankerModel: ${rerankerModel}`);
+      return;
+    }
+    console.error("Usage: qmx config <set-host|set-model|set-expander|set-reranker|get>");
+    process.exit(1);
+  }
+
+  if (command === "collection") {
+    const [sub, ...subArgs] = rest;
+    if (sub === "add") {
+      const rootPath = requireValue(subArgs[0], "Usage: qmx collection add <path> --name <name> [--mask <glob>]");
+      const name = parseFlagString(subArgs, "-n", "--name");
+      const mask = parseFlagString(subArgs, null, "--mask", "**/*.md");
+      if (!name) {
+        console.error("Flag --name wajib diisi.");
+        process.exit(1);
+      }
+      addCollection(db, { name, rootPath, mask });
+      console.log(`Collection '${name}' tersimpan.`);
+      return;
+    }
+    if (sub === "list") {
+      const rows = listCollections(db);
+      if (rows.length === 0) return console.log("Belum ada collection.");
+      for (const row of rows) console.log(`${row.name}\t${row.rootPath}\tmask=${row.mask}`);
+      return;
+    }
+    if (sub === "remove") {
+      const name = requireValue(subArgs[0], "Usage: qmx collection remove <name>");
+      removeCollection(db, name);
+      console.log(`Collection '${name}' dihapus.`);
+      return;
+    }
+    if (sub === "rename") {
+      const oldName = requireValue(subArgs[0], "Usage: qmx collection rename <old> <new>");
+      const newName = requireValue(subArgs[1], "Usage: qmx collection rename <old> <new>");
+      renameCollection(db, oldName, newName);
+      console.log(`Collection '${oldName}' -> '${newName}'.`);
+      return;
+    }
+    console.error("Usage: qmx collection <add|list|remove|rename> ...");
+    process.exit(1);
+  }
+
+  if (command === "context") {
+    const [sub, ...subArgs] = rest;
+    if (sub === "add") {
+      const target = requireValue(subArgs[0], "Usage: qmx context add <target> <text>");
+      const text = requireValue(subArgs[1], "Usage: qmx context add <target> <text>");
+      addContext(db, { target, value: text });
+      console.log(`Context '${target}' tersimpan.`);
+      return;
+    }
+    if (sub === "list") {
+      const rows = listContexts(db);
+      if (rows.length === 0) return console.log("Belum ada context.");
+      for (const row of rows) console.log(`${row.target}\t${row.value}`);
+      return;
+    }
+    if (sub === "rm") {
+      const target = requireValue(subArgs[0], "Usage: qmx context rm <target>");
+      removeContext(db, target);
+      console.log(`Context '${target}' dihapus.`);
+      return;
+    }
+    console.error("Usage: qmx context <add|list|rm> ...");
+    process.exit(1);
+  }
+
+  if (command === "update") {
+    const embed = !rest.includes("--no-embed");
+    const stats = await runIndexUpdate(db, { embed, host, model });
+    console.log(`Index updated | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed}`);
+    return;
+  }
+
+  if (command === "embed") {
+    const force = rest.includes("-f") || rest.includes("--force");
+    if (force) {
+      const cleared = clearEmbeddings(db);
+      console.log(`Embedding cache dibersihkan: ${cleared} dokumen.`);
+    }
+    let printedHeader = false;
+    const stats = await runIndexUpdate(db, {
+      embed: true,
+      host,
+      model,
+      onProgress: (event) => {
+        if (event.stage === "plan") {
+          const lines = buildEmbedIntro({
+            documents: event.documents,
+            chunks: event.chunks,
+            bytes: event.bytes,
+            splitDocuments: event.splitDocuments,
+            model: event.model,
+          });
+          for (const line of lines) console.log(line);
+          printedHeader = true;
+          return;
+        }
+        if (event.stage === "doc") {
+          console.log(`[${event.index}/${event.total}] embedded ${event.displayPath} (${event.chunks} chunks)`);
+        }
+      },
+    });
+    if (!printedHeader) {
+      const lines = buildEmbedIntro({
+        documents: stats.embeddedDocs,
+        chunks: stats.embeddedChunks,
+        bytes: stats.embeddedBytes,
+        splitDocuments: stats.splitDocuments,
+        model,
+      });
+      for (const line of lines) console.log(line);
+    }
+    console.log(
+      `Embed selesai | scanned=${stats.scanned} added=${stats.added} updated=${stats.updated} removed=${stats.removed} embedded_docs=${stats.embeddedDocs} embedded_chunks=${stats.embeddedChunks}`
+    );
+    return;
+  }
+
+  if (command === "cleanup") {
+    const cleaned = cleanupDb(db);
+    rebuildFts(db);
+    console.log(`Cleanup done | removed_fts_orphans=${cleaned.removedFtsOrphans}`);
+    return;
+  }
+
+  if (command === "ls") {
+    const rows = lsCollection(db, rest[0]);
+    if (rows.length === 0) return console.log("Tidak ada data.");
+    for (const row of rows) console.log(row);
+    return;
+  }
+
+  if (command === "search") {
+    const query = requireValue(rest[0], "Usage: qmx search <query>");
+    const n = parseFlagNumber(rest, "-n", 5);
+    const collection = parseFlagString(rest, "-c", "--collection", "");
+    const minScoreIdx = rest.indexOf("--min-score");
+    const minScore = minScoreIdx >= 0 && minScoreIdx + 1 < rest.length ? Number(rest[minScoreIdx + 1]) || 0 : 0;
+    const rows = searchDocuments(db, { query, limit: n, collection: collection || undefined, all: rest.includes("--all"), minScore });
+    outputRows(rows, rest);
+    return;
+  }
+
+  if (command === "vsearch") {
+    const query = requireValue(rest[0], "Usage: qmx vsearch <query>");
+    const n = parseFlagNumber(rest, "-n", 5);
+    const collection = parseFlagString(rest, "-c", "--collection", "");
+    const minScoreIdx = rest.indexOf("--min-score");
+    const minScore = minScoreIdx >= 0 && minScoreIdx + 1 < rest.length ? Number(rest[minScoreIdx + 1]) || 0 : 0;
+    try {
+      const rows = await vsearchDocuments(db, {
+        query,
+        limit: n,
+        collection: collection || undefined,
+        host,
+        model,
+        all: rest.includes("--all"),
+        minScore,
+      });
+      outputRows(rows, rest);
+    } catch (error) {
+      console.error(`vsearch gagal menghubungi Ollama di ${host}: ${String(error)}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (command === "query") {
+    const query = requireValue(rest[0], "Usage: qmx query <query>");
+    const n = parseFlagNumber(rest, "-n", 5);
+    const collection = parseFlagString(rest, "-c", "--collection", "");
+    const minScoreIdx = rest.indexOf("--min-score");
+    const minScore = minScoreIdx >= 0 && minScoreIdx + 1 < rest.length ? Number(rest[minScoreIdx + 1]) || 0 : 0;
+    try {
+      const rows = await queryDocuments(db, {
+        query,
+        limit: n,
+        collection: collection || undefined,
+        host,
+        model,
+        expanderModel,
+        rerankerModel,
+        noExpand: rest.includes("--no-expand"),
+        noRerank: rest.includes("--no-rerank"),
+        all: rest.includes("--all"),
+        minScore,
+      });
+      outputRows(rows, rest);
+    } catch (error) {
+      console.error(`query gagal menghubungi Ollama di ${host}: ${String(error)}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (command === "get") {
+    const refInput = requireValue(rest[0], "Usage: qmx get <path|#docid> [-l <lines>] [--from <line>] [--line-numbers]");
+    const parsedRef = parseRefWithLine(refInput);
+    const maxLines = parseFlagNumber(rest, "-l", 0);
+    const fromIdx = rest.indexOf("--from");
+    const fromLine = fromIdx >= 0 && fromIdx + 1 < rest.length ? Number(rest[fromIdx + 1]) || parsedRef.fromLine : parsedRef.fromLine;
+
+    const doc = getDocument(db, parsedRef.ref, { fromLine, maxLines, lineNumbers: rest.includes("--line-numbers") });
+    if (!doc) {
+      console.error(`Dokumen tidak ditemukan: ${parsedRef.ref}`);
+      process.exit(1);
+    }
+    console.log(`--- ${doc.displayPath} #${doc.docid} ---`);
+    console.log(doc.content);
+    return;
+  }
+
+  if (command === "multi-get") {
+    const pattern = requireValue(rest[0], "Usage: qmx multi-get <pattern|list|docids>");
+    const maxLines = parseFlagNumber(rest, "-l", 0);
+    const maxBytesIdx = rest.indexOf("--max-bytes");
+    const maxBytes = maxBytesIdx >= 0 && maxBytesIdx + 1 < rest.length ? Number(rest[maxBytesIdx + 1]) || 10240 : 10240;
+
+    const docs = multiGetDocuments(db, pattern, {
+      fromLine: 1,
+      maxLines,
+      lineNumbers: rest.includes("--line-numbers"),
+    }).filter((d) => Buffer.byteLength(d.content, "utf8") <= maxBytes);
+
+    if (rest.includes("--json")) return console.log(JSON.stringify(docs, null, 2));
+    if (docs.length === 0) return console.log("Tidak ada dokumen cocok.");
+
+    for (const doc of docs) {
+      console.log(`\n--- ${doc.displayPath} #${doc.docid} ---`);
+      console.log(doc.content);
+    }
+    return;
+  }
+
+  if (command === "status") {
+    const info = statusInfo(db);
+    console.log("QMX status: active");
+    console.log(`Runtime: Bun ${Bun.version}`);
+    console.log(`DB: ${dbPath}`);
+    console.log(`Collections: ${info.collections}`);
+    console.log(`Documents: ${info.documents}`);
+    console.log(`Embedded docs: ${info.embedded}`);
+    console.log(`Contexts: ${info.contexts}`);
+    console.log(`Config file: ${configPath()}`);
+    console.log(`Ollama host: ${host}`);
+    console.log(`Embed model: ${model}`);
+    console.log(`Expander model: ${expanderModel}`);
+    console.log(`Reranker model: ${rerankerModel}`);
+    return;
+  }
+
+  if (command === "doctor") {
+    const checks = doctorChecks(db);
+    for (const check of checks) {
+      console.log(`${check.ok ? "OK" : "WARN"}\t${check.check}\t${check.message}`);
+    }
+    return;
+  }
+
+  console.error(`Command tidak dikenal: ${command}`);
+  printHelp();
+  process.exit(1);
+}
+
+void main();

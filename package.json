@@ -1,0 +1,20 @@
+{
+  "name": "qmx",
+  "module": "src/qmx.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "qmx": "qmx"
+  },
+  "scripts": {
+    "start": "bun src/qmx.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
