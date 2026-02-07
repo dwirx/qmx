@@ -55,7 +55,7 @@ chmod +x qmx
 
 ## Workflow (QMX Native)
 
-Contoh alur setara style `qmd`, tapi full native `qmx`:
+Contoh alur penggunaan full native `qmx`:
 
 ```bash
 # Create collections for your notes, docs, and meeting transcripts
